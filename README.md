@@ -48,52 +48,6 @@ R4 — Both Sides         Lock the weaker side, or expand the side with rising t
 
 ---
 
-## Architecture
-
-```
-5Min/
-│
-├── main.py                      ← Bot orchestrator & entry point
-│
-├── api/
-│   ├── auth.py                  ← Polymarket wallet + API auth
-│   └── clob_client.py           ← CLOB REST client (prices, orders)
-│
-├── monitor/
-│   ├── market_finder.py         ← Gamma API polling & market registration
-│   └── closure_checker.py       ← Detects resolved markets, archives positions
-│
-├── strategy/
-│   ├── trend.py                 ← Rising / falling / flat trend detection
-│   ├── decision.py              ← R1–R4 decision engine
-│   └── position.py              ← Position state & PnL calculations
-│
-├── trader/
-│   └── executor.py              ← Live order execution via CLOB
-│
-├── paper_trading/
-│   ├── paper_clob.py            ← Simulated CLOB (uses real price feed)
-│   ├── paper_executor.py        ← Paper order execution
-│   ├── paper_store.py           ← In-memory paper state
-│   ├── paper_db.py              ← SQLite session persistence
-│   └── paper_analytics.py      ← P&L and session analytics
-│
-├── state/
-│   └── store.py                 ← Live market & position state
-│
-├── telegram_bot/
-│   ├── bot.py                   ← Bot runner & command routing
-│   ├── dashboard.py             ← Interactive Telegram dashboard
-│   └── notifier.py              ← Log & trade channel notifications
-│
-├── utils/
-│   └── logger.py                ← Structured logging
-│
-└── config.py                    ← All environment variable loading
-```
-
----
-
 ## Quickstart
 
 ### 1. Clone & Install
