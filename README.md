@@ -48,35 +48,72 @@ R4 — Both Sides         Lock the weaker side, or expand the side with rising t
 
 ---
 
-## Quickstart
+## ⚙️ Installation
 
-### 1. Clone & Install
+### 1. Clone Repository
 
 ```bash
-git clone https://github.com/ayusharyaneth/5Min.git
-cd 5Min
+git clone https://github.com/ayusharyaneth/5min.git
+cd 5min
+```
+
+### 2. Create Virtual Environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Upgrade pip (Recommended)
+
+```bash
+pip install --upgrade pip
+```
+
+### 4. Install Dependencies
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure
+---
+
+### 5. Environment Configuration
+
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
+
 Open `.env` and fill in your credentials (see [Configuration](#configuration) below).
 
-### 3. Run
+---
+
+
+### 6. Running Dexy
 
 ```bash
-python main.py
+python3 main.py
 ```
 
 On startup the bot will validate your config, initialize all components, send a startup message to your Telegram log channel, and begin trading.
 
 Press `Ctrl+C` to stop — the bot will archive the current paper session before exiting.
 
+
 ---
+
+### 🔄 Updating
+
+```bash
+git pull origin main
+pip install -r requirements.txt
+```
+
+---
+
 
 ## Configuration
 
