@@ -11,8 +11,92 @@ import json
 import logging
 import threading
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime, timezone, timedelta
+
+# ═══════════════════════════════════════════════════════════
+# MANDATORY ENVIRONMENT VARIABLE VALIDATION
+# ═══════════════════════════════════════════════════════════
+
+def validate_mandatory_env():
+    """
+    Check for mandatory environment variables.
+    If any are missing, print error and force exit.
+    """
+    # Define mandatory variables
+    MANDATORY_VARS = [
+        'TELEGRAM_TOKEN',  # Essential for bot to function
+    ]
+    
+    # Conditional mandatory based on mode
+    trading_mode = os.getenv('TRADING_MODE', 'paper').lower()
+    
+    if trading_mode == 'live':
+        # Additional requirements for live trading
+        MANDATORY_VARS.extend([
+            'POLYMARKET_PK',  # Private key required for live trading
+            'POLYMARKET_API_KEY',  # API credentials
+            'POLYMARKET_SECRET'
+        ])
+    
+    # Check for missing variables
+    missing = []
+    for var in MANDATORY_VARS:
+        if not os.getenv(var):
+            missing.append(var)
+    
+    if missing:
+        # Print error banner
+        print("\n" + "═" * 60)
+        print("❌  ERROR: MANDATORY ENVIRONMENT VARIABLES MISSING")
+        print("═" * 60)
+        print("\nThe following required variables are not set:\n")
+        
+        for var in missing:
+            if var == 'TELEGRAM_TOKEN':
+                print(f"  • {var} - Your Telegram Bot Token (get from @BotFather)")
+            elif var == 'POLYMARKET_PK':
+                print(f"  • {var} - Your Polymarket Private Key (required for LIVE mode)")
+            elif var == 'POLYMARKET_API_KEY':
+                print(f"  • {var} - Polymarket API Key")
+            elif var == 'POLYMARKET_SECRET':
+                print(f"  • {var} - Polymarket API Secret")
+            else:
+                print(f"  • {var}")
+        
+        print("\n" + "─" * 60)
+        print("Setup Instructions:")
+        print("─" * 60)
+        
+        if 'TELEGRAM_TOKEN' in missing:
+            print("\n1. Get Telegram Token:")
+            print("   • Message @BotFather on Telegram")
+            print("   • Create new bot with /newbot")
+            print("   • Copy the token provided")
+        
+        if trading_mode == 'live' and any(x in missing for x in ['POLYMARKET_PK', 'POLYMARKET_API_KEY']):
+            print("\n2. Polymarket Setup (for Live Trading):")
+            print("   • Export your wallet private key")
+            print("   • Get API credentials from Polymarket dashboard")
+        
+        print("\n3. Set Environment Variables:")
+        print("   export TELEGRAM_TOKEN='your_token_here'")
+        if trading_mode == 'live':
+            print("   export POLYMARKET_PK='your_private_key'")
+            print("   export TRADING_MODE='live'")
+        else:
+            print("   export TRADING_MODE='paper'")
+        
+        print("\n4. Or create .env file in bot directory with these variables")
+        print("═" * 60)
+        print("🛑 SHUTTING DOWN - Cannot start without required configuration")
+        print("═" * 60 + "\n")
+        
+        # Force exit
+        sys.exit(1)
+
+# Run validation immediately on import
+validate_mandatory_env()
 
 # ═══════════════════════════════════════════════════════════
 # LOGGING SETUP
@@ -65,7 +149,7 @@ class TradingBot:
         
     def _load_config(self, path: str) -> Dict:
         defaults = {
-            "trading_mode": "paper",
+            "trading_mode": os.getenv('TRADING_MODE', 'paper'),
             "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
             "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
             "shimmer_api_key": os.getenv("SHIMMER_KEY", ""),
@@ -219,7 +303,7 @@ class TradingBot:
         logger.info("══════════════════════════════════════")
 
     def run(self):
-        """Entry point - THIS WAS MISSING!"""
+        """Entry point"""
         try:
             self.start()
         except Exception as e:
