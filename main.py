@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 5Min Trading Bot - Main Entry Point
-High-frequency trading bot for 5-minute prediction markets
 """
 
 import os
@@ -10,27 +9,60 @@ import time
 import json
 import logging
 import threading
-import asyncio  # CRITICAL FIX: Added missing import
+import asyncio
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, Any
 
-# Configure logging first
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# ═══════════════════════════════════════════════════════════
+# CLEAN LOGGING SETUP
+# ═══════════════════════════════════════════════════════════
 
-# Import trading components
+class CleanFormatter(logging.Formatter):
+    """Ultra-clean formatter with emojis and minimal clutter"""
+    
+    def format(self, record):
+        # Emoji mapping
+        emojis = {
+            'INFO': '✓',
+            'WARNING': '⚠',
+            'ERROR': '✗',
+            'CRITICAL': '🔥',
+            'DEBUG': '•'
+        }
+        
+        # Simplify module names
+        module = record.name.split('.')[-1].replace('_', ' ').title()
+        
+        # Format: "✓ Module | Message"
+        emoji = emojis.get(record.levelname, '•')
+        return f"{emoji} {module:12} | {record.getMessage()}"
+
+# Setup clean handler
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(CleanFormatter())
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.handlers = []  # Remove default handlers
+root_logger.addHandler(handler)
+
+# Silence noisy libraries
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)
+
+logger = logging.getLogger('Main')
+
+# ═══════════════════════════════════════════════════════════
+# IMPORTS
+# ═══════════════════════════════════════════════════════════
+
 try:
     from paper_trading.paper_executor import PaperExecutor
     from paper_trading.paper_db import PaperDB
 except ImportError as e:
-    logger.error(f"Failed to import paper_trading modules: {e}")
+    logger.error(f"Paper trading import failed: {e}")
     PaperExecutor = None
     PaperDB = None
 
@@ -38,48 +70,36 @@ try:
     from monitor.market_finder import MarketFinder
     from monitor.closure_checker import ClosureChecker
 except ImportError as e:
-    logger.error(f"Failed to import monitor modules: {e}")
+    logger.error(f"Monitor import failed: {e}")
     MarketFinder = None
     ClosureChecker = None
 
 try:
     from telegram_bot.bot import TelegramBotRunner
 except ImportError as e:
-    logger.error(f"Failed to import telegram_bot: {e}")
+    logger.error(f"Telegram import failed: {e}")
     TelegramBotRunner = None
 
 try:
     from telegram_bot.dashboard import Dashboard
-except ImportError as e:
-    logger.warning(f"Dashboard not available: {e}")
+except ImportError:
     Dashboard = None
 
-# Optional CLOB and Store imports - these may not exist in your project yet
-try:
-    from data.clob_client import CLOBClient  # Adjust based on your actual module
-except ImportError:
-    try:
-        from clob import CLOBClient
-    except ImportError:
-        CLOBClient = None
+# Optional components
+CLOBClient = None
+DataStore = None
 
-try:
-    from data.store import DataStore  # Adjust based on your actual module
-except ImportError:
-    try:
-        from store import DataStore
-    except ImportError:
-        DataStore = None
-
+# ═══════════════════════════════════════════════════════════
+# BOT CLASS
+# ═══════════════════════════════════════════════════════════
 
 class TradingBot:
     def __init__(self, config_path: str = "config.json"):
-        """Initialize the trading bot with configuration"""
         self.config = self._load_config(config_path)
         self.running = False
         self.threads = []
         
-        # Component placeholders
+        # Components
         self.db = None
         self.store = None
         self.clob = None
@@ -89,11 +109,12 @@ class TradingBot:
         self.dashboard = None
         self.telegram_bot = None
         
-        logger.info("TradingBot instance created")
+        # Track if we've logged the "no markets" warning already
+        self._logged_no_markets = False
 
     def _load_config(self, path: str) -> Dict:
-        """Load configuration from JSON file"""
-        default_config = {
+        """Load config with defaults"""
+        defaults = {
             "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
             "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
             "initial_balance": 10000.0,
@@ -101,346 +122,233 @@ class TradingBot:
             "discovery_interval": 15,
             "auto_trade": False,
             "default_trade_size": 1.0,
-            "symbols": ["BTC-USD", "ETH-USD"],
-            "notifications_enabled": True,
-            "paper_trading": True,
             "db_path": "trades.db"
         }
         
-        try:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    loaded_config = json.load(f)
-                    default_config.update(loaded_config)
-                    logger.info(f"Configuration loaded from {path}")
-            else:
-                logger.warning(f"Config file {path} not found, using defaults")
-                # Create default config file
-                with open(path, 'w') as f:
-                    json.dump(default_config, f, indent=2)
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-            
-        return default_config
-
-    def _init_database(self):
-        """Initialize database connection"""
-        try:
-            if PaperDB:
-                self.db = PaperDB(self.config.get('db_path', 'trades.db'))
-                logger.info("Database initialized")
-            else:
-                self.db = None
-                logger.warning("PaperDB not available")
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            self.db = None
-
-    def _init_clob_and_store(self):
-        """Initialize CLOB and Data Store - creates mock objects if real ones unavailable"""
-        # Initialize Store if available
-        if DataStore:
+        if os.path.exists(path):
             try:
-                self.store = DataStore(config=self.config)
-                logger.info("DataStore initialized")
+                with open(path) as f:
+                    defaults.update(json.load(f))
             except Exception as e:
-                logger.warning(f"DataStore initialization failed: {e}")
-                self.store = None
+                logger.warning(f"Config load failed: {e}")
         else:
-            self.store = None
-            logger.debug("DataStore module not found")
+            with open(path, 'w') as f:
+                json.dump(defaults, f, indent=2)
+            logger.info(f"Created default config: {path}")
         
-        # Initialize CLOB if available
-        if CLOBClient:
-            try:
-                self.clob = CLOBClient(config=self.config)
-                logger.info("CLOB Client initialized")
-            except Exception as e:
-                logger.warning(f"CLOB initialization failed: {e}")
-                self.clob = None
-        else:
-            self.clob = None
-            logger.debug("CLOBClient module not found")
+        return defaults
 
     def _init_components(self):
-        """Initialize all trading components with proper dependency injection"""
+        """Initialize all components with clean logging"""
         logger.info("Initializing components...")
         
-        # 1. Initialize DB first
-        self._init_database()
+        # Database
+        if PaperDB:
+            try:
+                self.db = PaperDB(self.config['db_path'])
+                logger.info("Database connected")
+            except Exception as e:
+                logger.error(f"Database failed: {e}")
         
-        # 2. Initialize CLOB and Store (needed by other components)
-        self._init_clob_and_store()
-        
-        # 3. Initialize Dashboard if available (FIXED: removed config argument)
+        # Dashboard (optional)
         if Dashboard:
             try:
-                # Try initializing without config first
                 self.dashboard = Dashboard()
-                logger.info("Dashboard initialized")
-            except TypeError as e:
-                # If it needs arguments, try with config as positional or handle differently
-                try:
-                    self.dashboard = Dashboard(self.config)
-                    logger.info("Dashboard initialized with config")
-                except Exception as e2:
-                    logger.error(f"Failed to initialize dashboard: {e2}")
-                    self.dashboard = None
-            except Exception as e:
-                logger.error(f"Failed to initialize dashboard: {e}")
-                self.dashboard = None
+                logger.info("Dashboard ready")
+            except:
+                pass  # Silent fail for optional component
         
-        # 4. Initialize Paper Executor (core trading engine)
+        # Paper Executor
         if PaperExecutor:
             try:
                 self.paper_exec = PaperExecutor(
-                    initial_balance=self.config.get('initial_balance', 10000.0),
-                    paper_clob=self.clob,  # Pass CLOB for price data (can be None)
-                    paper_store=self.store,  # Pass store for persistence (can be None)
-                    db=self.db,  # Pass database
-                    config=self.config,
+                    initial_balance=self.config['initial_balance'],
+                    paper_clob=None,  # Will use mock/mock later
+                    paper_store=None,
+                    db=self.db,
+                    config=self.config
                 )
-                logger.info(f"PaperExecutor initialized with balance: ${self.config.get('initial_balance', 10000.0)}")
+                logger.info(f"Trading engine ready | Balance: ${self.config['initial_balance']:,.0f}")
             except Exception as e:
-                logger.error(f"Failed to initialize PaperExecutor: {e}")
-                self.paper_exec = None
-        else:
-            logger.error("PaperExecutor not available")
-            self.paper_exec = None
+                logger.error(f"Trading engine failed: {e}")
         
-        # 5. Initialize Market Finder (depends on CLOB/Store)
+        # Market Finder
         if MarketFinder:
             try:
                 self.market_finder = MarketFinder(
-                    clob=self.clob,  # For market data (can be None)
-                    store=self.store,  # For persistence (can be None)
-                    db=self.db,  # For recording opportunities
+                    clob=None,
+                    store=None,
+                    db=self.db,
                     config=self.config,
-                    paper_executor=self.paper_exec,  # For auto-trading
+                    paper_executor=self.paper_exec
                 )
-                logger.info("MarketFinder initialized")
+                logger.info("Market finder ready")
             except Exception as e:
-                logger.error(f"Failed to initialize MarketFinder: {e}")
-                self.market_finder = None
-        else:
-            logger.error("MarketFinder not available")
-            self.market_finder = None
+                logger.error(f"Market finder failed: {e}")
         
-        # 6. Initialize Closure Checker (depends on CLOB/Store/DB)
+        # Closure Checker
         if ClosureChecker:
             try:
                 self.closure_checker = ClosureChecker(
-                    clob=self.clob,  # For market status (can be None)
-                    store=self.store,  # For settlement data (can be None)
-                    db=self.db,  # For recording settlements
+                    clob=None,
+                    store=None,
+                    db=self.db,
                     config=self.config,
-                    paper_executor=self.paper_exec,  # To update positions
+                    paper_executor=self.paper_exec
                 )
-                logger.info("ClosureChecker initialized")
+                logger.info("Monitor ready")
             except Exception as e:
-                logger.error(f"Failed to initialize ClosureChecker: {e}")
-                self.closure_checker = None
-        else:
-            logger.error("ClosureChecker not available")
-            self.closure_checker = None
+                logger.error(f"Monitor failed: {e}")
         
-        # 7. Initialize Telegram Bot (pass ALL dependencies)
-        if TelegramBotRunner:
+        # Telegram Bot
+        if TelegramBotRunner and self.config.get('telegram_token'):
             try:
-                # Prepare bot config with chat_id
                 bot_config = self.config.copy()
-                if 'telegram_chat_id' in self.config:
-                    bot_config['chat_id'] = self.config['telegram_chat_id']
+                bot_config['chat_id'] = self.config.get('telegram_chat_id')
                 
                 self.telegram_bot = TelegramBotRunner(
-                    token=self.config.get('telegram_token', ''),
+                    token=self.config['telegram_token'],
                     config=bot_config,
-                    dashboard=self.dashboard,  # Dashboard integration (can be None)
-                    db=self.db,  # Database access
-                    store=self.store,  # Store access (can be None)
-                    paper_executor=self.paper_exec,  # CRITICAL: Trading engine
-                    market_finder=self.market_finder,  # CRITICAL: Market data
-                    closure_checker=self.closure_checker  # CRITICAL: Monitor
+                    dashboard=self.dashboard,
+                    db=self.db,
+                    store=self.store,
+                    paper_executor=self.paper_exec,
+                    market_finder=self.market_finder,
+                    closure_checker=self.closure_checker
                 )
                 
-                # Inject telegram bot back into other components for notifications
+                # Inject notifier back
                 if self.paper_exec:
                     self.paper_exec._external_notifier = self.telegram_bot
-                
                 if self.market_finder:
                     self.market_finder._external_notifier = self.telegram_bot
-                    
                 if self.closure_checker:
                     self.closure_checker._external_notifier = self.telegram_bot
                 
-                logger.info("TelegramBotRunner initialized with all dependencies")
+                logger.info("Telegram bot ready")
             except Exception as e:
-                logger.error(f"Failed to initialize TelegramBotRunner: {e}")
-                self.telegram_bot = None
-        else:
-            logger.error("TelegramBotRunner not available")
-            self.telegram_bot = None
+                logger.error(f"Telegram bot failed: {e}")
         
-        logger.info("Components initialized successfully")
+        # Summary
+        active = sum([bool(self.db), bool(self.paper_exec), 
+                     bool(self.market_finder), bool(self.closure_checker),
+                     bool(self.telegram_bot)])
+        logger.info(f"Systems online: {active}/5")
 
     def _market_discovery_loop(self):
-        """Background thread: Continuously find trading opportunities"""
-        logger.info("Market discovery thread started")
-        
-        if not self.market_finder:
-            logger.error("MarketFinder not available, stopping discovery thread")
-            return
-        
+        """Background market discovery"""
+        logger.info("Market discovery started")
         interval = self.config.get('discovery_interval', 15)
         
         while self.running:
             try:
-                # Find BTC 5m markets
-                markets = self.market_finder.find_active_btc_5m_markets()
-                
-                if markets:
-                    logger.info(f"Discovered {len(markets)} active BTC 5m markets")
-                    # Analyze for opportunities
-                    symbols = [m.get('symbol', m.get('market_id')) for m in markets if m]
-                    if symbols:
-                        opportunities = self.market_finder.find_opportunities(symbols)
-                        if opportunities:
-                            logger.info(f"Found {len(opportunities)} trading opportunities")
-                else:
-                    logger.debug("No active BTC 5m markets found")
+                if self.market_finder:
+                    markets = self.market_finder.find_active_btc_5m_markets()
+                    
+                    if markets:
+                        logger.info(f"Found {len(markets)} BTC markets")
+                        symbols = [m.get('symbol') for m in markets if m]
+                        if symbols:
+                            opportunities = self.market_finder.find_opportunities(symbols)
+                            if opportunities:
+                                logger.info(f"Found {len(opportunities)} opportunities")
+                    else:
+                        # Only log this once to avoid spam
+                        if not self._logged_no_markets:
+                            logger.warning("No markets found (CLOB not connected)")
+                            self._logged_no_markets = True
                 
                 time.sleep(interval)
                 
             except Exception as e:
-                logger.error(f"Market discovery error: {e}")
+                logger.error(f"Discovery error: {e}")
                 time.sleep(5)
 
     def _closure_check_loop(self):
-        """Background thread: Monitor for market closures and settle positions"""
-        logger.info("Closure check thread started")
+        """Background closure monitoring"""
+        logger.info("Monitor started")
         
         if not self.closure_checker:
-            logger.error("ClosureChecker not available, stopping closure thread")
             return
         
-        # CRITICAL FIX: Initialize loop variable before try block
         loop = None
-        
         try:
-            # Create and run async event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self.closure_checker.run())
         except Exception as e:
-            logger.error(f"Closure check loop error: {e}")
+            logger.error(f"Monitor error: {e}")
         finally:
-            # CRITICAL FIX: Only close if loop was successfully created
             if loop:
                 try:
                     loop.close()
-                except Exception as e:
-                    logger.error(f"Error closing event loop: {e}")
+                except:
+                    pass
 
     def start(self):
-        """Start the trading bot"""
-        logger.info("Starting 5Min Trading Bot...")
-        self.running = True
+        """Start bot"""
+        logger.info("═" * 50)
+        logger.info("5MIN TRADING BOT STARTING")
+        logger.info("═" * 50)
         
-        # Initialize all components
+        self.running = True
         self._init_components()
         
-        # Start Telegram Bot
+        # Start Telegram
         if self.telegram_bot:
-            try:
-                self.telegram_bot.start()
-                # Give bot time to connect
-                time.sleep(2)
-            except Exception as e:
-                logger.error(f"Failed to start Telegram bot: {e}")
+            self.telegram_bot.start()
+            time.sleep(2)
+            logger.info("Bot active - Press Ctrl+C to stop")
         
-        # Start Market Discovery Thread
+        # Start threads
         if self.market_finder:
-            discovery_thread = threading.Thread(
-                target=self._market_discovery_loop,
-                name="MarketDiscovery",
-                daemon=True
-            )
-            discovery_thread.start()
-            self.threads.append(discovery_thread)
+            t = threading.Thread(target=self._market_discovery_loop, name="Discovery", daemon=True)
+            t.start()
+            self.threads.append(t)
         
-        # Start Closure Check Thread
         if self.closure_checker:
-            closure_thread = threading.Thread(
-                target=self._closure_check_loop,
-                name="ClosureChecker",
-                daemon=True
-            )
-            closure_thread.start()
-            self.threads.append(closure_thread)
+            t = threading.Thread(target=self._closure_check_loop, name="Monitor", daemon=True)
+            t.start()
+            self.threads.append(t)
         
-        logger.info("All systems started. Entering main loop...")
         self._main_loop()
 
     def _main_loop(self):
-        """Main trading loop"""
-        logger.info("Starting main trading loop...")
-        
-        while self.running:
-            try:
-                # Main bot logic here
+        """Main loop"""
+        try:
+            while self.running:
                 time.sleep(1)
-                
-            except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received")
-                self.stop()
-                break
-            except Exception as e:
-                logger.error(f"Main loop error: {e}")
-                time.sleep(5)
+        except KeyboardInterrupt:
+            logger.info("\n" + "═" * 50)
+            logger.info("SHUTDOWN SIGNAL RECEIVED")
+            self.stop()
 
     def stop(self):
-        """Stop the trading bot gracefully"""
-        logger.info("Stopping 5Min Trading Bot...")
+        """Stop bot"""
+        logger.info("Stopping...")
         self.running = False
         
-        # Stop Telegram bot
         if self.telegram_bot:
-            try:
-                self.telegram_bot.stop()
-            except Exception as e:
-                logger.error(f"Error stopping Telegram bot: {e}")
-        
-        # Stop closure checker if it has a stop method
+            self.telegram_bot.stop()
         if self.closure_checker and hasattr(self.closure_checker, 'stop'):
-            try:
-                self.closure_checker.stop()
-            except Exception as e:
-                logger.error(f"Error stopping closure checker: {e}")
+            self.closure_checker.stop()
         
-        # Wait for threads to finish
-        for thread in self.threads:
-            if thread.is_alive():
-                logger.info(f"Waiting for {thread.name} to finish...")
-                thread.join(timeout=5)
+        for t in self.threads:
+            if t.is_alive():
+                t.join(timeout=3)
         
-        logger.info("Bot stopped successfully")
+        logger.info("Bot stopped")
+        logger.info("═" * 50)
 
     def run(self):
-        """Entry point to run the bot"""
         try:
             self.start()
         except Exception as e:
-            logger.critical(f"Fatal error in bot execution: {e}")
+            logger.critical(f"Fatal error: {e}")
             raise
 
 
 def main():
-    """Main entry point"""
-    # Check for required environment variables
-    if not os.getenv("TELEGRAM_TOKEN") and not os.path.exists("config.json"):
-        logger.warning("TELEGRAM_TOKEN not set and config.json not found")
-        logger.info("Creating default config.json - please edit it with your credentials")
-    
     bot = TradingBot()
     bot.run()
 
