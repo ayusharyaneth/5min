@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-5Min Trading Bot - Secure & Visual
+5Min Trading Bot - Auto-Trade ON by Default
 """
 
 import os
@@ -75,18 +75,12 @@ class EmojiFormatter(logging.Formatter):
     }
     
     def format(self, record):
-        # Get emoji based on logger name or level
         name = record.name.split('.')[-1].upper()
         emoji = self.EMOJIS.get(name, self.EMOJIS.get(record.levelname, '•'))
-        
-        # Format time
         time_str = datetime.now().strftime('%H:%M:%S')
-        
-        # Clean message (no secrets)
         msg = record.getMessage()
         import re
         msg = re.sub(r'0x[a-fA-F0-9]{10,}', '***', msg)
-        
         return f"{emoji} {time_str} │ {msg}"
 
 logging.basicConfig(
@@ -100,7 +94,6 @@ for handler in logging.getLogger().handlers:
 
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
-
 logger = logging.getLogger('MAIN')
 
 # ═══════════════════════════════════════════════════════════
@@ -147,14 +140,21 @@ class TradingBot:
             "live_enabled": live_enabled,
             "shimmer_api_key": os.getenv("SHIMMER_API_KEY", ""),
             "shimmer_mock_mode": os.getenv("SHIMMER_MOCK_MODE", "true").lower() == "true",
-            "auto_trade": os.getenv("PAPER_AUTO_TRADE", "false").lower() == "true",
+            
+            # ⚠️  CHANGED: Default is now "true" (was "false")
+            "auto_trade": os.getenv("PAPER_AUTO_TRADE", "true").lower() == "true",
             "default_trade_size": float(os.getenv("PAPER_TRADE_SIZE", "10")),
             "initial_balance": 10000.0,
+            
             "polymarket_pk": os.getenv("POLYMARKET_PK", ""),
             "polymarket_api_key": os.getenv("POLYMARKET_API_KEY", ""),
             "polymarket_secret": os.getenv("POLYMARKET_SECRET", ""),
-            "live_auto_trade": os.getenv("LIVE_AUTO_TRADE", "false").lower() == "true",
+            
+            # ⚠️  CHANGED: Default is now "true" (was "false")  
+            "live_auto_trade": os.getenv("LIVE_AUTO_TRADE", "true").lower() == "true",
             "live_trade_size": float(os.getenv("LIVE_TRADE_SIZE", "5")),
+            "live_max_size": float(os.getenv("LIVE_MAX_SIZE", "50")),
+            
             "check_interval": 60
         }
 
@@ -164,7 +164,6 @@ class TradingBot:
         return f"{address[:6]}...{address[-4:]}"
 
     def _get_uptime(self) -> str:
-        """Get uptime in readable format"""
         uptime = time.time() - self.start_time
         hours = int(uptime // 3600)
         minutes = int((uptime % 3600) // 60)
@@ -175,6 +174,12 @@ class TradingBot:
         logger.info("══════════════════════════════════════════")
         logger.info("🚀 INITIALIZING TRADING SYSTEMS")
         logger.info("══════════════════════════════════════════")
+        
+        # Show auto-trade status
+        if self.config['auto_trade']:
+            logger.info("🤖 PAPER AUTO-TRADE: ✅ ENABLED (Default)")
+        if self.config['live_auto_trade']:
+            logger.info("🤖 LIVE AUTO-TRADE: ✅ ENABLED (Default)")
         
         # Paper System
         if self.paper_enabled:
@@ -199,6 +204,10 @@ class TradingBot:
                 
                 mode = "🎭 MOCK" if self.shimmer.mock_mode else "🔗 API"
                 logger.info(f"📘 Paper Ready │ Mode: {mode} │ Balance: ${self.config['initial_balance']:,.0f}")
+                
+                # Show auto-trade warning
+                if self.config['auto_trade']:
+                    logger.info("📘 ⚠️  Paper Auto-Trading is ACTIVE - Will trade automatically!")
                 
             except Exception as e:
                 logger.error(f"📘 Paper Failed: {str(e)}")
@@ -230,6 +239,10 @@ class TradingBot:
                 logger.info(f"💰 Live Connected │ Wallet: {wallet}")
                 logger.info(f"💰 Balance: {balance.get('usdc', 0)} USDC")
                 
+                # Show auto-trade warning for live
+                if self.config['live_auto_trade']:
+                    logger.warning("💰 🔥 LIVE AUTO-TRADE IS ACTIVE - REAL MONEY WILL BE TRADED!")
+                
             except Exception as e:
                 error_msg = str(e)
                 if '0x' in error_msg:
@@ -252,7 +265,7 @@ class TradingBot:
                     market_finder=self.market_finder,
                     paper_enabled=self.paper_enabled,
                     live_enabled=self.live_enabled,
-                    get_uptime=self._get_uptime  # Pass uptime function
+                    get_uptime=self._get_uptime
                 )
                 
                 if self.paper_exec:
@@ -263,7 +276,7 @@ class TradingBot:
                 logger.info("📱 Telegram Ready")
             except Exception as e:
                 logger.error(f"📱 Telegram Failed")
-        
+
         # Summary
         logger.info("══════════════════════════════════════════")
         active = []
@@ -336,9 +349,11 @@ class TradingBot:
         print("\n" + "╔" + "═" * 48 + "╗")
         print("║" + " " * 12 + "🤖 5MIN TRADING BOT" + " " * 17 + "║")
         if self.paper_enabled:
-            print("║" + " " * 12 + "📘 Paper: ENABLED" + " " * 19 + "║")
+            auto_status = "AUTO-ON" if self.config['auto_trade'] else "MANUAL"
+            print("║" + " " * 12 + f"📘 Paper: {auto_status}" + " " * 19 + "║")
         if self.live_enabled:
-            print("║" + " " * 12 + "💰 Live:  ENABLED" + " " * 19 + "║")
+            auto_status = "AUTO-ON" if self.config['live_auto_trade'] else "MANUAL"
+            print("║" + " " * 12 + f"💰 Live: {auto_status}" + " " * 20 + "║")
         print("╚" + "═" * 48 + "╝\n")
         
         self.running = True
