@@ -1,0 +1,52 @@
+{
+  "_comment": "5Min Trading Bot Configuration",
+  
+  "trading_mode": "paper",
+  
+  "telegram": {
+    "token": "${TELEGRAM_TOKEN}",
+    "chat_id": "${TELEGRAM_CHAT_ID}",
+    "notifications_enabled": true
+  },
+  
+  "shimmer": {
+    "api_key": "${SHIMMER_API_KEY}",
+    "url": "https://api.shimmer.network",
+    "mock_mode": true
+  },
+  
+  "polymarket": {
+    "private_key": "${POLYMARKET_PK}",
+    "api_key": "${POLYMARKET_API_KEY}",
+    "secret": "${POLYMARKET_SECRET}",
+    "wallet_address": "${POLYMARKET_WALLET_ADDRESS}",
+    "enabled": false
+  },
+  
+  "trading": {
+    "initial_balance": 10000.0,
+    "max_trade_size": 100.0,
+    "default_trade_size": 1.0,
+    "auto_trade": false,
+    "confirm_trades": true,
+    "check_interval": 60,
+    "discovery_interval": 15
+  },
+  
+  "risk_management": {
+    "max_daily_loss": 1000.0,
+    "max_position_size": 500.0,
+    "stop_loss_percent": 5.0
+  },
+  
+  "database": {
+    "path": "trades.db"
+  },
+  
+  "logging": {
+    "level": "INFO",
+    "format": "minimal",
+    "save_to_file": true,
+    "file_path": "bot.log"
+  }
+}
