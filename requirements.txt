@@ -8,16 +8,13 @@ pytz>=2023.3
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Database
-# sqlite3 REMOVED - it's built into Python!
-
 # Async
 aiohttp>=3.8.0
 
 # Polymarket (Live Trading) - Uncomment when needed
-# py-clob-client>=0.0.1
-# web3>=6.0.0
-# eth-account>=0.8.0
+py-clob-client>=0.0.1
+web3>=6.0.0
+eth-account>=0.8.0
 
 # Utils
 python-dotenv>=1.0.0
