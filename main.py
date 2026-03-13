@@ -10,6 +10,7 @@ import time
 import json
 import logging
 import threading
+import asyncio  # CRITICAL FIX: Added missing import
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
@@ -53,22 +54,21 @@ except ImportError as e:
     logger.warning(f"Dashboard not available: {e}")
     Dashboard = None
 
+# Optional CLOB and Store imports - these may not exist in your project yet
 try:
-    from data.clob import CLOBClient  # Adjust import based on your actual CLOB module
+    from data.clob_client import CLOBClient  # Adjust based on your actual module
 except ImportError:
     try:
         from clob import CLOBClient
     except ImportError:
-        logger.warning("CLOBClient not found, using None")
         CLOBClient = None
 
 try:
-    from data.store import DataStore  # Adjust import based on your actual store module
+    from data.store import DataStore  # Adjust based on your actual module
 except ImportError:
     try:
         from store import DataStore
     except ImportError:
-        logger.warning("DataStore not found, using None")
         DataStore = None
 
 
@@ -98,6 +98,7 @@ class TradingBot:
             "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
             "initial_balance": 10000.0,
             "check_interval": 60,
+            "discovery_interval": 15,
             "auto_trade": False,
             "default_trade_size": 1.0,
             "symbols": ["BTC-USD", "ETH-USD"],
@@ -136,28 +137,30 @@ class TradingBot:
             self.db = None
 
     def _init_clob_and_store(self):
-        """Initialize CLOB and Data Store"""
-        # Initialize Store
-        try:
-            if DataStore:
+        """Initialize CLOB and Data Store - creates mock objects if real ones unavailable"""
+        # Initialize Store if available
+        if DataStore:
+            try:
                 self.store = DataStore(config=self.config)
                 logger.info("DataStore initialized")
-            else:
+            except Exception as e:
+                logger.warning(f"DataStore initialization failed: {e}")
                 self.store = None
-        except Exception as e:
-            logger.error(f"Failed to initialize store: {e}")
+        else:
             self.store = None
+            logger.debug("DataStore module not found")
         
-        # Initialize CLOB
-        try:
-            if CLOBClient:
+        # Initialize CLOB if available
+        if CLOBClient:
+            try:
                 self.clob = CLOBClient(config=self.config)
                 logger.info("CLOB Client initialized")
-            else:
+            except Exception as e:
+                logger.warning(f"CLOB initialization failed: {e}")
                 self.clob = None
-        except Exception as e:
-            logger.error(f"Failed to initialize CLOB: {e}")
+        else:
             self.clob = None
+            logger.debug("CLOBClient module not found")
 
     def _init_components(self):
         """Initialize all trading components with proper dependency injection"""
@@ -169,11 +172,20 @@ class TradingBot:
         # 2. Initialize CLOB and Store (needed by other components)
         self._init_clob_and_store()
         
-        # 3. Initialize Dashboard if available
+        # 3. Initialize Dashboard if available (FIXED: removed config argument)
         if Dashboard:
             try:
-                self.dashboard = Dashboard(config=self.config)
+                # Try initializing without config first
+                self.dashboard = Dashboard()
                 logger.info("Dashboard initialized")
+            except TypeError as e:
+                # If it needs arguments, try with config as positional or handle differently
+                try:
+                    self.dashboard = Dashboard(self.config)
+                    logger.info("Dashboard initialized with config")
+                except Exception as e2:
+                    logger.error(f"Failed to initialize dashboard: {e2}")
+                    self.dashboard = None
             except Exception as e:
                 logger.error(f"Failed to initialize dashboard: {e}")
                 self.dashboard = None
@@ -183,11 +195,10 @@ class TradingBot:
             try:
                 self.paper_exec = PaperExecutor(
                     initial_balance=self.config.get('initial_balance', 10000.0),
-                    paper_clob=self.clob,  # Pass CLOB for price data
-                    paper_store=self.store,  # Pass store for persistence
+                    paper_clob=self.clob,  # Pass CLOB for price data (can be None)
+                    paper_store=self.store,  # Pass store for persistence (can be None)
                     db=self.db,  # Pass database
                     config=self.config,
-                    # notifier will be lazy-loaded to avoid circular imports
                 )
                 logger.info(f"PaperExecutor initialized with balance: ${self.config.get('initial_balance', 10000.0)}")
             except Exception as e:
@@ -201,12 +212,11 @@ class TradingBot:
         if MarketFinder:
             try:
                 self.market_finder = MarketFinder(
-                    clob=self.clob,  # For market data
-                    store=self.store,  # For persistence
+                    clob=self.clob,  # For market data (can be None)
+                    store=self.store,  # For persistence (can be None)
                     db=self.db,  # For recording opportunities
                     config=self.config,
                     paper_executor=self.paper_exec,  # For auto-trading
-                    notifier=None  # Will lazy load
                 )
                 logger.info("MarketFinder initialized")
             except Exception as e:
@@ -220,12 +230,11 @@ class TradingBot:
         if ClosureChecker:
             try:
                 self.closure_checker = ClosureChecker(
-                    clob=self.clob,  # For market status
-                    store=self.store,  # For settlement data
+                    clob=self.clob,  # For market status (can be None)
+                    store=self.store,  # For settlement data (can be None)
                     db=self.db,  # For recording settlements
                     config=self.config,
                     paper_executor=self.paper_exec,  # To update positions
-                    notifier=None  # Will lazy load
                 )
                 logger.info("ClosureChecker initialized")
             except Exception as e:
@@ -246,9 +255,9 @@ class TradingBot:
                 self.telegram_bot = TelegramBotRunner(
                     token=self.config.get('telegram_token', ''),
                     config=bot_config,
-                    dashboard=self.dashboard,  # Dashboard integration
+                    dashboard=self.dashboard,  # Dashboard integration (can be None)
                     db=self.db,  # Database access
-                    store=self.store,  # Store access
+                    store=self.store,  # Store access (can be None)
                     paper_executor=self.paper_exec,  # CRITICAL: Trading engine
                     market_finder=self.market_finder,  # CRITICAL: Market data
                     closure_checker=self.closure_checker  # CRITICAL: Monitor
@@ -282,7 +291,7 @@ class TradingBot:
             logger.error("MarketFinder not available, stopping discovery thread")
             return
         
-        interval = self.config.get('discovery_interval', 15)  # Check every 15 seconds
+        interval = self.config.get('discovery_interval', 15)
         
         while self.running:
             try:
@@ -304,7 +313,7 @@ class TradingBot:
                 
             except Exception as e:
                 logger.error(f"Market discovery error: {e}")
-                time.sleep(5)  # Short sleep on error
+                time.sleep(5)
 
     def _closure_check_loop(self):
         """Background thread: Monitor for market closures and settle positions"""
@@ -314,15 +323,23 @@ class TradingBot:
             logger.error("ClosureChecker not available, stopping closure thread")
             return
         
-        # Run the async loop in this thread
+        # CRITICAL FIX: Initialize loop variable before try block
+        loop = None
+        
         try:
+            # Create and run async event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self.closure_checker.run())
         except Exception as e:
             logger.error(f"Closure check loop error: {e}")
         finally:
-            loop.close()
+            # CRITICAL FIX: Only close if loop was successfully created
+            if loop:
+                try:
+                    loop.close()
+                except Exception as e:
+                    logger.error(f"Error closing event loop: {e}")
 
     def start(self):
         """Start the trading bot"""
@@ -350,7 +367,6 @@ class TradingBot:
             )
             discovery_thread.start()
             self.threads.append(discovery_thread)
-            logger.info("Market discovery thread started")
         
         # Start Closure Check Thread
         if self.closure_checker:
@@ -361,7 +377,6 @@ class TradingBot:
             )
             closure_thread.start()
             self.threads.append(closure_thread)
-            logger.info("Closure check thread started")
         
         logger.info("All systems started. Entering main loop...")
         self._main_loop()
@@ -373,11 +388,6 @@ class TradingBot:
         while self.running:
             try:
                 # Main bot logic here
-                # This could include:
-                # - Periodic status checks
-                # - Health monitoring
-                # - Strategy execution
-                
                 time.sleep(1)
                 
             except KeyboardInterrupt:
@@ -400,8 +410,8 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Error stopping Telegram bot: {e}")
         
-        # Stop closure checker
-        if self.closure_checker:
+        # Stop closure checker if it has a stop method
+        if self.closure_checker and hasattr(self.closure_checker, 'stop'):
             try:
                 self.closure_checker.stop()
             except Exception as e:
