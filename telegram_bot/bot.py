@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 logger = logging.getLogger(__name__)
 
 
-class TelegramBot:
+class TelegramBotRunner:
     def __init__(self, token: str, config: Optional[Dict] = None):
         self.token = token
         self.config = config or {}
