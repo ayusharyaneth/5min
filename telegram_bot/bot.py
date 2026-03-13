@@ -4,7 +4,7 @@ import threading
 from typing import Optional, Dict, Any, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import BadRequest  # Import for error handling
+from telegram.error import BadRequest
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +61,16 @@ class TelegramBotRunner:
         for handler in handlers:
             self.application.add_handler(handler)
         
+        # Refresh callbacks
         self.application.add_handler(CallbackQueryHandler(self.refresh_balance_callback, pattern="^refresh_balance$"))
         self.application.add_handler(CallbackQueryHandler(self.refresh_history_callback, pattern="^refresh_history$"))
         self.application.add_handler(CallbackQueryHandler(self.refresh_pnl_callback, pattern="^refresh_pnl$"))
         self.application.add_handler(CallbackQueryHandler(self.refresh_status_callback, pattern="^refresh_status$"))
         
-        logger.info(f"Registered {len(handlers)} command handlers and 4 refresh callbacks")
+        # CRITICAL: Auto-trade toggle callback
+        self.application.add_handler(CallbackQueryHandler(self.toggle_auto_trade_callback, pattern="^toggle_auto_trade$"))
+        
+        logger.info(f"Registered {len(handlers)} command handlers and 5 callbacks")
 
     def get_refresh_markup(self, callback_data: str) -> InlineKeyboardMarkup:
         keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data=callback_data)]]
@@ -85,12 +89,11 @@ class TelegramBotRunner:
                 await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=markup)
         except BadRequest as e:
             if "Message is not modified" in str(e):
-                # Data hasn't changed, just acknowledge the refresh
                 if update.callback_query:
-                    await update.callback_query.answer("✅ Data is up to date")
+                    await update.callback_query.answer("✅ Already up to date")
                 logger.debug("Refresh requested but data unchanged")
             else:
-                raise  # Re-raise other BadRequest errors
+                raise
         except Exception as e:
             logger.error(f"Error editing message: {e}")
             raise
@@ -100,7 +103,8 @@ class TelegramBotRunner:
             "🤖 <b>5Min Trading Bot Started</b>\n\n"
             f"Paper Trading: {'✅ Active' if self.paper_executor else '❌ Not Connected'}\n"
             f"Market Finder: {'✅ Active' if self.market_finder else '❌ Not Connected'}\n"
-            f"Closure Monitor: {'✅ Active' if self.closure_checker else '❌ Not Connected'}\n\n"
+            f"Closure Monitor: {'✅ Active' if self.closure_checker else '❌ Not Connected'}\n"
+            f"Auto-Trade: {'✅ ON' if self.config.get('auto_trade', False) else '❌ OFF'}\n\n"
             "Use /help for available commands"
         )
         await update.message.reply_text(welcome_text, parse_mode='HTML')
@@ -138,8 +142,8 @@ class TelegramBotRunner:
             status_lines.append("❌ Closure Checker: Not initialized")
         
         status_lines.append(f"🗄 Database: {'✅' if self.db else '❌'}")
+        status_lines.append(f"🤖 Auto-Trade: {'✅ ON' if self.config.get('auto_trade', False) else '❌ OFF'}")
         
-        # Add timestamp to ensure message changes on refresh
         from datetime import datetime
         status_lines.append(f"\n<i>Last updated: {datetime.now().strftime('%H:%M:%S')}</i>")
         
@@ -408,17 +412,67 @@ class TelegramBotRunner:
         )
         await update.message.reply_text(alert_text, parse_mode='HTML')
 
-    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
+        """Show settings with Auto-Trade toggle button"""
+        from datetime import datetime
+        
+        is_auto_trade = self.config.get('auto_trade', False)
+        
         settings_text = (
             "⚙️ <b>Bot Configuration</b>\n\n"
-            f"Auto-Trade: {'✅' if self.config.get('auto_trade', False) else '❌'}\n"
+            f"Auto-Trade: {'✅ ON' if is_auto_trade else '❌ OFF'}\n"
             f"Trade Size: {self.config.get('default_trade_size', 'Not set')}\n"
+            f"Check Interval: {self.config.get('check_interval', '60')}s\n\n"
             f"Components:\n"
             f"  Paper: {'✅' if self.paper_executor else '❌'}\n"
             f"  Finder: {'✅' if self.market_finder else '❌'}\n"
-            f"  Checker: {'✅' if self.closure_checker else '❌'}"
+            f"  Checker: {'✅' if self.closure_checker else '❌'}\n\n"
+            f"<i>Updated: {datetime.now().strftime('%H:%M:%S')}</i>"
         )
-        await update.message.reply_text(settings_text, parse_mode='HTML')
+        
+        # Create toggle button
+        toggle_text = "🔴 Disable Auto-Trade" if is_auto_trade else "🟢 Enable Auto-Trade"
+        keyboard = [
+            [InlineKeyboardButton(toggle_text, callback_data="toggle_auto_trade")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_settings")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        
+        if edit and update.callback_query:
+            try:
+                await update.callback_query.edit_message_text(
+                    settings_text, 
+                    parse_mode='HTML', 
+                    reply_markup=markup
+                )
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    await update.callback_query.answer("✅ Settings unchanged")
+                else:
+                    raise
+        else:
+            await update.message.reply_text(settings_text, parse_mode='HTML', reply_markup=markup)
+
+    async def toggle_auto_trade_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Auto-Trade toggle button click"""
+        query = update.callback_query
+        
+        # Toggle the value
+        current = self.config.get('auto_trade', False)
+        self.config['auto_trade'] = not current
+        
+        new_status = "ON ✅" if self.config['auto_trade'] else "OFF ❌"
+        logger.info(f"Auto-Trade toggled to: {new_status}")
+        
+        # Notify user
+        await query.answer(f"Auto-Trade is now {new_status}")
+        
+        # Update market_finder if available to apply changes immediately
+        if self.market_finder:
+            self.market_finder.config['auto_trade'] = self.config['auto_trade']
+        
+        # Refresh the settings message
+        await self.cmd_settings(update, context, edit=True)
 
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🛑 <b>Stopping bot...</b>\nGoodbye!", parse_mode='HTML')
@@ -434,14 +488,15 @@ class TelegramBotRunner:
 /history - Trade history ↻
 /pnl - P&L summary ↻
 /status - System status ↻
+/settings - Configuration & Auto-Trade toggle 🔄
 /positions - Open positions
 /markets - Active markets
 /trade - Trade panel
-/settings - Configuration
 /stop - Stop bot
 /help - This help
 
-<i>↻ = Refresh button available</i>
+<i>↻ = Refresh button</i>
+<i>🔄 = Toggle button</i>
         """
         await update.message.reply_text(help_text, parse_mode='HTML')
 
