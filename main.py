@@ -12,11 +12,15 @@ import logging
 import threading
 import asyncio
 from typing import Dict, Any
+from datetime import datetime, timezone, timedelta
 
-# Logging setup
+# ═══════════════════════════════════════════════════════════
+# LOGGING SETUP
+# ═══════════════════════════════════════════════════════════
+
 class AlignFormatter(logging.Formatter):
     def format(self, record):
-        icons = {'INFO': '✓', 'WARNING': '⚠', 'ERROR': '✗', 'CRITICAL': '🔥'}
+        icons = {'INFO': '✓', 'WARNING': '⚠', 'ERROR': '✗', 'CRITICAL': '🔥', 'DEBUG': '·'}
         icon = icons.get(record.levelname, '•')
         name = record.name.split('.')[-1].upper()[:10].ljust(10)
         return f"{icon}  {name} | {record.getMessage()}"
@@ -26,19 +30,25 @@ handler.setFormatter(AlignFormatter())
 logging.getLogger().addHandler(handler)
 logging.getLogger().setLevel(logging.INFO)
 logging.getLogger('httpx').setLevel(logging.ERROR)
+logging.getLogger('telegram').setLevel(logging.ERROR)
 
 logger = logging.getLogger('MAIN')
 
-# Imports
+# ═══════════════════════════════════════════════════════════
+# IMPORTS
+# ═══════════════════════════════════════════════════════════
+
 try:
     from data.shimmer_client import ShimmerClient
-    from data.polymarket_client import PolymarketClient
     from paper_trading.paper_executor import PaperExecutor
-    from live_trading.live_executor import LiveExecutor
     from monitor.market_finder import MarketFinder
     from telegram_bot.bot import TelegramBotRunner
 except ImportError as e:
     logger.error(f"Import error: {e}")
+
+# ═══════════════════════════════════════════════════════════
+# BOT CLASS
+# ═══════════════════════════════════════════════════════════
 
 class TradingBot:
     def __init__(self, config_path: str = "config.json"):
@@ -46,193 +56,124 @@ class TradingBot:
         self.running = False
         self.threads = []
         
-        # Mode: 'paper' (Shimmer) or 'live' (Polymarket)
         self.trading_mode = self.config.get('trading_mode', 'paper')
         
         self.shimmer = None
-        self.polymarket = None
-        self.executor = None
+        self.paper_exec = None
         self.market_finder = None
         self.telegram = None
         
     def _load_config(self, path: str) -> Dict:
         defaults = {
-            "trading_mode": "paper",  # 'paper' or 'live'
+            "trading_mode": "paper",
             "telegram_token": os.getenv("TELEGRAM_TOKEN", ""),
             "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
-            
-            # Shimmer (Paper) Settings
             "shimmer_api_key": os.getenv("SHIMMER_KEY", ""),
             "shimmer_url": "https://api.shimmer.network",
             "mock_mode": True,
-            
-            # Polymarket (Live) Settings
-            "polymarket_private_key": os.getenv("POLYMARKET_PK", ""),
-            "polymarket_api_key": os.getenv("POLYMARKET_API_KEY", ""),
-            "polymarket_secret": os.getenv("POLYMARKET_SECRET", ""),
-            
-            # Trading Settings
             "initial_balance": 10000.0,
-            "max_trade_size": 100,  # USDC
+            "max_trade_size": 100.0,
             "auto_trade": False,
-            "confirm_trades": True,  # Require confirmation for live trades
+            "default_trade_size": 1.0,
+            "check_interval": 60,
+            "discovery_interval": 15,
+            "db_path": "trades.db"
         }
         
         if os.path.exists(path):
-            with open(path) as f:
-                defaults.update(json.load(f))
+            try:
+                with open(path) as f:
+                    loaded = json.load(f)
+                    defaults.update(loaded)
+            except Exception as e:
+                logger.warning(f"Config error: {e}")
         else:
             with open(path, 'w') as f:
                 json.dump(defaults, f, indent=2)
+            logger.info(f"Created default config: {path}")
         
         return defaults
 
     def _init_components(self):
         """Initialize based on trading mode"""
-        mode = self.trading_mode.upper()
         logger.info(f"{'='*40}")
-        logger.info(f"MODE: {mode} TRADING")
+        logger.info(f"MODE: {self.trading_mode.upper()} TRADING")
         logger.info(f"{'='*40}")
         
-        if self.trading_mode == 'paper':
-            self._init_paper_mode()
-        elif self.trading_mode == 'live':
-            self._init_live_mode()
-        else:
-            logger.error(f"Unknown mode: {self.trading_mode}")
-            sys.exit(1)
+        # Initialize components
+        if ShimmerClient:
+            self.shimmer = ShimmerClient(self.config)
+            logger.info("Shimmer connected")
         
-        # Telegram (works with both)
-        if TelegramBotRunner and self.config.get('telegram_token'):
-            self.telegram = TelegramBotRunner(
-                token=self.config['telegram_token'],
-                config=self.config,
-                executor=self.executor,
-                market_finder=self.market_finder
-            )
-            if self.executor:
-                self.executor.notifier = self.telegram
-            logger.info("Telegram ready")
-
-    def _init_paper_mode(self):
-        """Initialize Shimmer simulation"""
-        logger.info("Initializing Paper Trading (Shimmer)...")
-        
-        # Shimmer Client
-        self.shimmer = ShimmerClient(self.config)
-        
-        # Paper Executor
         if PaperExecutor:
-            self.executor = PaperExecutor(
+            self.paper_exec = PaperExecutor(
                 initial_balance=self.config['initial_balance'],
                 paper_clob=self.shimmer,
                 config=self.config
             )
+            logger.info(f"Trading ready | Balance ${self.config['initial_balance']:,.0f}")
         
-        # Market Finder using Shimmer data
-        self.market_finder = MarketFinder(
-            clob=self.shimmer,
-            config=self.config,
-            paper_executor=self.executor
-        )
+        if MarketFinder:
+            self.market_finder = MarketFinder(
+                clob=self.shimmer,
+                config=self.config,
+                paper_executor=self.paper_exec
+            )
+            logger.info("Market finder ready")
         
-        logger.info("Paper trading ready")
-        logger.info(f"Virtual Balance: ${self.config['initial_balance']:,.2f}")
+        if TelegramBotRunner and self.config.get('telegram_token'):
+            self.telegram = TelegramBotRunner(
+                token=self.config['telegram_token'],
+                config=self.config,
+                paper_executor=self.paper_exec,
+                market_finder=self.market_finder
+            )
+            
+            if self.paper_exec:
+                self.paper_exec._external_notifier = self.telegram
+            if self.market_finder:
+                self.market_finder._external_notifier = self.telegram
+            
+            logger.info("Telegram ready")
+        
+        count = sum([bool(self.shimmer), bool(self.paper_exec), 
+                    bool(self.market_finder), bool(self.telegram)])
+        logger.info(f"Systems online: {count}/4")
 
-    def _init_live_mode(self):
-        """Initialize Polymarket live trading"""
-        logger.info("Initializing LIVE Trading (Polymarket)...")
-        logger.warning("⚠️  REAL MONEY WILL BE USED")
-        
-        # Check for wallet key
-        if not self.config.get('polymarket_private_key'):
-            logger.error("No private key found! Set POLYMARKET_PK env var")
-            sys.exit(1)
-        
-        # Polymarket Client
-        self.polymarket = PolymarketClient(self.config)
-        
-        if not self.polymarket.connected:
-            logger.error("Failed to connect to Polymarket")
-            sys.exit(1)
-        
-        # Live Executor
-        self.executor = LiveExecutor(
-            polymarket_client=self.polymarket,
-            config=self.config
-        )
-        
-        # Market Finder using Polymarket data
-        self.market_finder = MarketFinder(
-            clob=self.polymarket,  # PolymarketClient has same interface
-            config=self.config,
-            paper_executor=None  # Live executor handles trades
-        )
-        
-        balance = self.polymarket.get_balance()
-        logger.info(f"Live trading ready")
-        logger.info(f"Real Balance: {balance.get('usdc', 0)} USDC")
-
-    def _trading_loop(self):
-        """Main trading loop"""
-        logger.info("Trading loop started")
-        interval = self.config.get('check_interval', 15)
+    def _market_discovery_loop(self):
+        """Market discovery"""
+        logger.info("Discovery started")
+        interval = self.config.get('discovery_interval', 15)
+        warned = False
         
         while self.running:
             try:
                 if self.market_finder:
-                    # Find markets
                     markets = self.market_finder.find_active_btc_5m_markets()
                     
                     if markets:
                         logger.info(f"Found {len(markets)} markets")
-                        
-                        for market in markets[:3]:  # Check top 3
-                            logger.info(f"  → {market.get('symbol')}")
-                            
-                            # Analyze
-                            opportunities = self.market_finder.find_opportunities([market['symbol']])
-                            
-                            if opportunities and self.config.get('auto_trade'):
-                                for opp in opportunities:
-                                    logger.info(f"  💡 Opportunity: {opp.get('signal')} "
-                                              f"({opp.get('confidence', 0):.0%})")
-                                    
-                                    # Execute based on mode
-                                    if self.trading_mode == 'paper':
-                                        # Auto-execute paper trades
-                                        self.executor.execute_trade(
-                                            symbol=market['symbol'],
-                                            side=opp['signal'],
-                                            size=self.config.get('trade_size', 10)
-                                        )
-                                    else:
-                                        # Live mode - require confirmation or strict criteria
-                                        if opp.get('confidence', 0) > 0.85:  # High confidence only
-                                            logger.warning("High confidence signal - executing LIVE trade")
-                                            self.executor.execute_trade(
-                                                market_id=market['market_id'],
-                                                side=opp['signal'],
-                                                size=min(self.config.get('trade_size', 10), 
-                                                        self.config.get('max_trade_size', 50)),
-                                                price=opp.get('price', 0.5)
-                                            )
-                    
+                        if self.config.get('auto_trade'):
+                            for m in markets[:3]:
+                                opportunities = self.market_finder.find_opportunities([m['symbol']])
+                                if opportunities:
+                                    logger.info(f"Opportunities: {len(opportunities)}")
                     else:
-                        logger.warning("No markets found")
+                        if not warned:
+                            logger.warning("No markets (CLOB not connected)")
+                            warned = True
                 
                 time.sleep(interval)
                 
             except Exception as e:
-                logger.error(f"Loop error: {e}")
+                logger.error(f"Discovery error: {e}")
                 time.sleep(5)
 
     def start(self):
         """Start bot"""
         print()
         logger.info("══════════════════════════════════════")
-        logger.info("   5MIN TRADING BOT")
-        logger.info(f"   Mode: {self.trading_mode.upper()}")
+        logger.info("     5MIN TRADING BOT STARTING")
         logger.info("══════════════════════════════════════")
         
         self.running = True
@@ -241,31 +182,56 @@ class TradingBot:
         if self.telegram:
             self.telegram.start()
             time.sleep(2)
+            logger.info("Use Ctrl+C to stop")
+            print()
         
-        # Start trading thread
-        t = threading.Thread(target=self._trading_loop, name="Trading", daemon=True)
-        t.start()
-        self.threads.append(t)
+        if self.market_finder:
+            t = threading.Thread(target=self._market_discovery_loop, name="Discovery", daemon=True)
+            t.start()
+            self.threads.append(t)
         
-        logger.info("Bot running. Press Ctrl+C to stop.")
         self._main_loop()
 
     def _main_loop(self):
+        """Main loop"""
         try:
             while self.running:
                 time.sleep(1)
         except KeyboardInterrupt:
             print()
-            logger.info("Shutdown...")
+            logger.info("══════════════════════════════════════")
+            logger.info("     SHUTDOWN SIGNAL RECEIVED")
             self.stop()
 
     def stop(self):
+        """Stop bot"""
+        logger.info("Stopping...")
         self.running = False
+        
+        if self.telegram:
+            self.telegram.stop()
+        
         for t in self.threads:
-            t.join(timeout=2)
-        logger.info("Stopped")
+            if t.is_alive():
+                t.join(timeout=2)
+        
+        logger.info("Bot stopped")
+        logger.info("══════════════════════════════════════")
+
+    def run(self):
+        """Entry point - THIS WAS MISSING!"""
+        try:
+            self.start()
+        except Exception as e:
+            logger.critical(f"Fatal error: {e}")
+            raise
+
+# ═══════════════════════════════════════════════════════════
+# MAIN ENTRY
+# ═══════════════════════════════════════════════════════════
 
 def main():
+    """Main entry point"""
     bot = TradingBot()
     bot.run()
 
