@@ -9,9 +9,37 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramBotRunner:
-    def __init__(self, token: str, config: Optional[Dict] = None):
+    def __init__(self, 
+                 token: str, 
+                 config: Optional[Dict] = None,
+                 dashboard: Any = None,
+                 db: Any = None,
+                 store: Any = None,
+                 paper_executor: Any = None,
+                 **kwargs):
+        """
+        Initialize Telegram Bot Runner with dependency injection
+        
+        Args:
+            token: Telegram bot API token
+            config: Configuration dictionary
+            dashboard: Dashboard instance for UI updates
+            db: Database connection
+            store: Data persistence layer
+            paper_executor: Paper trading executor reference
+            **kwargs: Additional arguments for extensibility
+        """
         self.token = token
         self.config = config or {}
+        self.dashboard = dashboard
+        self.db = db
+        self.store = store
+        self.paper_executor = paper_executor
+        
+        # Handle any extra kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+            
         self.application = None
         self.running = False
         self._loop = None
@@ -44,15 +72,73 @@ class TelegramBotRunner:
         await update.message.reply_text("🤖 Bot started! Use /help for commands.")
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("✅ System operational")
+        """Show system status including dashboard if available"""
+        status_text = "✅ System operational"
+        
+        if self.dashboard and hasattr(self.dashboard, 'get_status'):
+            try:
+                dash_status = self.dashboard.get_status()
+                status_text += f"\nDashboard: {dash_status}"
+            except Exception as e:
+                logger.error(f"Error getting dashboard status: {e}")
+                
+        await update.message.reply_text(status_text)
 
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show balance from paper executor if available"""
+        if self.paper_executor and hasattr(self.paper_executor, 'get_portfolio_value'):
+            try:
+                portfolio = self.paper_executor.get_portfolio_value()
+                balance_text = (
+                    f"💰 Portfolio Status:\n"
+                    f"Cash: ${portfolio.get('cash_balance', 0):,.2f}\n"
+                    f"Positions: ${portfolio.get('positions_value', 0):,.2f}\n"
+                    f"Total: ${portfolio.get('total_value', 0):,.2f}\n"
+                    f"PnL: ${portfolio.get('total_return', 0):,.2f}"
+                )
+                await update.message.reply_text(balance_text)
+                return
+            except Exception as e:
+                logger.error(f"Error getting balance: {e}")
+                
         await update.message.reply_text("💰 Balance check...")
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show open positions"""
+        if self.paper_executor and hasattr(self.paper_executor, 'positions'):
+            try:
+                positions = self.paper_executor.positions
+                if not positions:
+                    await update.message.reply_text("📊 No open positions")
+                    return
+                    
+                pos_text = "📊 Open Positions:\n"
+                for symbol, pos in positions.items():
+                    pos_text += f"{symbol}: {pos.get('quantity', 0)} @ ${pos.get('avg_entry_price', 0):.2f}\n"
+                await update.message.reply_text(pos_text)
+                return
+            except Exception as e:
+                logger.error(f"Error getting positions: {e}")
+                
         await update.message.reply_text("📊 Positions check...")
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show trade history"""
+        if self.paper_executor and hasattr(self.paper_executor, 'get_trade_history'):
+            try:
+                history = self.paper_executor.get_trade_history(limit=5)
+                if not history:
+                    await update.message.reply_text("📜 No recent trades")
+                    return
+                    
+                hist_text = "📜 Recent Trades:\n"
+                for trade in history:
+                    hist_text += f"{trade.get('symbol')} {trade.get('side')} @ ${trade.get('price', 0):.2f}\n"
+                await update.message.reply_text(hist_text)
+                return
+            except Exception as e:
+                logger.error(f"Error getting history: {e}")
+                
         await update.message.reply_text("📜 History check...")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,6 +165,21 @@ Available commands:
         self.stop()
 
     async def cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show P&L summary"""
+        if self.paper_executor and hasattr(self.paper_executor, 'get_portfolio_value'):
+            try:
+                portfolio = self.paper_executor.get_portfolio_value()
+                pnl_text = (
+                    f"📈 P&L Summary:\n"
+                    f"Total Return: ${portfolio.get('total_return', 0):,.2f}\n"
+                    f"Return %: {portfolio.get('return_pct', 0):.2f}%\n"
+                    f"Unrealized PnL: ${portfolio.get('unrealized_pnl', 0):,.2f}"
+                )
+                await update.message.reply_text(pnl_text)
+                return
+            except Exception as e:
+                logger.error(f"Error getting PnL: {e}")
+                
         await update.message.reply_text("📈 P&L Summary...")
 
     async def cmd_trade(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
