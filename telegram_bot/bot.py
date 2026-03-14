@@ -40,33 +40,89 @@ class TelegramBotRunner:
         self.market_finder = kwargs.get('market_finder')
         self.paper_enabled = kwargs.get('paper_enabled', False)
         self.live_enabled = kwargs.get('live_enabled', False)
-        self.get_uptime = kwargs.get('get_uptime', lambda: "Unknown")  # Uptime function
+        self.get_uptime = kwargs.get('get_uptime', lambda: "Unknown")
+        
+        # Security
+        self.authorized_user_id = str(config.get('authorized_user_id', ''))
+        self.logs_channel_id = config.get('logs_channel_id', '')
         
         self.app = None
         self.running = False
         self._loop = None
         self._thread = None
-        self.start_time = time.time()
+        
+        # Track unauthorized attempts
+        self.blocked_users = set()
 
-    def register_handlers(self):
-        handlers = [
-            CommandHandler("start", self.cmd_start),
-            CommandHandler("menu", self.cmd_menu),
-            CommandHandler("balance", self.cmd_balance),
-            CommandHandler("positions", self.cmd_positions),
-            CommandHandler("history", self.cmd_history),
-            CommandHandler("pnl", self.cmd_pnl),
-            CommandHandler("markets", self.cmd_markets),
-            CommandHandler("settings", self.cmd_settings),
-            CommandHandler("help", self.cmd_help),
-            CommandHandler("ping", self.cmd_ping),  # NEW: Ping command
-        ]
+    def _check_authorization(self, update: Update) -> bool:
+        """
+        Check if user is authorized to use the bot.
+        Returns True if authorized, False if not.
+        Sends alert to logs channel if unauthorized.
+        """
+        if not self.authorized_user_id:
+            logger.warning("No authorized_user_id set in config!")
+            return True  # Allow all if not configured (for safety)
         
-        for h in handlers:
-            self.app.add_handler(h)
+        user = update.effective_user
+        user_id = str(user.id) if user else None
         
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback))
-        logger.info("✅ Handlers registered")
+        if not user_id:
+            return False
+        
+        # Check if authorized
+        if user_id == str(self.authorized_user_id):
+            return True
+        
+        # UNAUTHORIZED - Send alert
+        username = user.username or "No username"
+        first_name = user.first_name or "Unknown"
+        last_name = user.last_name or ""
+        full_name = f"{first_name} {last_name}".strip()
+        
+        # Prevent spam - only alert once per user
+        if user_id not in self.blocked_users:
+            self.blocked_users.add(user_id)
+            
+            alert_message = (
+                f"🚨 **UNAUTHORIZED ACCESS ATTEMPT**\n\n"
+                f"👤 **User Details:**\n"
+                f"• ID: `{user_id}`\n"
+                f"• Username: @{username}\n"
+                f"• Name: {full_name}\n"
+                f"• Time: `{fmt_ist()}`\n\n"
+                f"⚠️ **Action:** User attempted to use your private bot!\n"
+                f"🛡️ **Status:** Access Denied"
+            )
+            
+            # Send to logs channel
+            if self.logs_channel_id and self._loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._send_alert_to_logs(alert_message),
+                        self._loop
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send security alert: {e}")
+            
+            # Log locally
+            logger.warning(f"🔒 BLOCKED: {full_name} (@{username}, ID: {user_id}) tried to access bot")
+        
+        return False
+
+    async def _send_alert_to_logs(self, message: str):
+        """Send alert to logs channel"""
+        if not self.logs_channel_id or not self.app:
+            return
+        
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.logs_channel_id,
+                text=message,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send to logs channel: {e}")
 
     def _back_btn(self) -> InlineKeyboardButton:
         return InlineKeyboardButton("⬅️ Back to Menu", callback_data="nav_menu")
@@ -97,38 +153,47 @@ class TelegramBotRunner:
             except:
                 pass
 
-    async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        🏓 Ping command - Check bot health and status
-        """
-        # Calculate response time
-        start = time.time()
-        uptime = self.get_uptime()
-        response_time = (time.time() - start) * 1000  # ms
-        
-        # System status
-        status_emoji = "🟢" if self.running else "🔴"
-        
-        paper_status = "🟢 Online" if self.paper_executor else "🔴 Offline"
-        live_status = "🟢 Online" if self.live_executor else "🔴 Offline"
-        market_status = "🟢 Online" if self.market_finder else "🔴 Offline"
-        
+    async def _unauthorized_response(self, update: Update):
+        """Send denial message to unauthorized user"""
         text = (
-            f"🏓 *Pong!* Bot is alive {status_emoji}\n\n"
-            f"⚡ *Response Time:* `{response_time:.1f}ms`\n"
-            f"⏱ *Uptime:* `{uptime}`\n"
-            f"🕐 *Current Time:* `{fmt_ist()}`\n\n"
-            f"*System Status:*\n"
-            f"📘 Paper Trading: {paper_status}\n"
-            f"💰 Live Trading: {live_status}\n"
-            f"📊 Market Finder: {market_status}\n\n"
-            f"_All systems operational ✅_"
+            f"⛔ **ACCESS DENIED**\n\n"
+            f"This is a private bot.\n"
+            f"You are not authorized to use this bot.\n\n"
+            f"🕐 {fmt_ist()}"
         )
         
-        keyboard = InlineKeyboardMarkup([[self._back_btn()]])
-        await self._send_or_edit(update, text, keyboard)
+        try:
+            await update.message.reply_text(text, parse_mode='Markdown')
+        except:
+            pass
+
+    def register_handlers(self):
+        """Register all handlers"""
+        handlers = [
+            CommandHandler("start", self.cmd_start),
+            CommandHandler("menu", self.cmd_menu),
+            CommandHandler("balance", self.cmd_balance),
+            CommandHandler("positions", self.cmd_positions),
+            CommandHandler("history", self.cmd_history),
+            CommandHandler("pnl", self.cmd_pnl),
+            CommandHandler("markets", self.cmd_markets),
+            CommandHandler("settings", self.cmd_settings),
+            CommandHandler("help", self.cmd_help),
+            CommandHandler("ping", self.cmd_ping),
+        ]
+        
+        for h in handlers:
+            self.app.add_handler(h)
+        
+        self.app.add_handler(CallbackQueryHandler(self.handle_callback))
+        logger.info("✅ Handlers registered with security")
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start command with authorization check"""
+        if not self._check_authorization(update):
+            await self._unauthorized_response(update)
+            return
+        
         status = []
         if self.paper_executor: status.append("📘 Paper: Online")
         else: status.append("📘 Paper: Offline")
@@ -147,6 +212,12 @@ class TelegramBotRunner:
         await self._send_or_edit(update, text, InlineKeyboardMarkup(keyboard))
 
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        """Main menu with authorization check"""
+        if not self._check_authorization(update):
+            if not edit:  # Only send denial on new command, not on callback
+                await self._unauthorized_response(update)
+            return
+        
         # Get balances
         paper_bal = "Offline"
         live_bal = "Offline"
@@ -165,8 +236,8 @@ class TelegramBotRunner:
         
         text = (
             f"*📱 Dashboard*\n\n"
-            f"📘 Paper: `{paper_bal}`\n"
-            f"💰 Live: `{live_bal}`\n"
+            f"📘 Paper Balance: `{paper_bal}`\n"
+            f"💰 Live Balance: `{live_bal}`\n"
             f"⏰ `{fmt_ist()}`\n\n"
             f"Select option:"
         )
@@ -177,12 +248,15 @@ class TelegramBotRunner:
             [InlineKeyboardButton("📜 History", callback_data="nav_history"),
              InlineKeyboardButton("📈 P&L", callback_data="nav_pnl")],
             [InlineKeyboardButton("⚙️ Settings", callback_data="nav_settings"),
-             InlineKeyboardButton("🏓 Ping", callback_data="nav_ping")],  # Added ping to menu
+             InlineKeyboardButton("🏓 Ping", callback_data="nav_ping")],
         ]
         
         await self._send_or_edit(update, text, InlineKeyboardMarkup(keyboard), edit)
 
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         lines = ["*💰 Account Balances*\n"]
         
         if self.paper_executor:
@@ -190,28 +264,28 @@ class TelegramBotRunner:
                 pf = self.paper_executor.get_portfolio_value()
                 lines.append(
                     f"*📘 Paper Account*\n"
-                    f"💵 Cash: `${pf['cash_balance']:,.2f}`\n"
-                    f"📊 Positions: `${pf['positions_value']:,.2f}`\n"
-                    f"💎 Total: `{pf['total_value']:,.2f}`\n"
-                    f"📈 PnL: `{pf['total_return']:+,.2f}`\n"
+                    f"Cash: `${pf['cash_balance']:,.2f}`\n"
+                    f"Positions: `${pf['positions_value']:,.2f}`\n"
+                    f"Total: `{pf['total_value']:,.2f}`\n"
+                    f"PnL: `{pf['total_return']:+,.2f}`\n"
                 )
             except:
-                lines.append("*📘 Paper Account*\n⚠️ Error loading\n")
+                lines.append("*📘 Paper Account*\n⚠️ Error\n")
         else:
-            lines.append("*📘 Paper Account*\n🔴 Offline\n")
+            lines.append("*📘 Paper Account*\n_Status: Offline_\n")
         
         if self.live_executor:
             try:
                 pf = self.live_executor.get_portfolio_value()
                 lines.append(
                     f"\n*💰 Live Account*\n"
-                    f"💵 USDC: `{pf.get('cash_balance', 0):,.2f}`\n"
-                    f"👛 Wallet: `{str(pf.get('wallet', 'N/A'))[:10]}...`\n"
+                    f"USDC: `{pf.get('cash_balance', 0):,.2f}`\n"
+                    f"Wallet: `{str(pf.get('wallet', 'N/A'))[:10]}...`\n"
                 )
             except:
-                lines.append(f"\n*💰 Live Account*\n⚠️ Error loading\n")
+                lines.append(f"\n*💰 Live Account*\n⚠️ Error\n")
         else:
-            lines.append(f"\n*💰 Live Account*\n🔴 Offline")
+            lines.append(f"\n*💰 Live Account*\n_Status: Offline_")
         
         lines.append(f"\n⏰ `{fmt_ist()}`")
         
@@ -219,10 +293,14 @@ class TelegramBotRunner:
         await self._send_or_edit(update, "\n".join(lines), keyboard, edit)
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_authorization(update):
+            return
+        
         lines = ["*📊 Open Positions*\n"]
         
         if not self.paper_executor and not self.live_executor:
-            lines.append("🔴 Both systems offline")
+            lines.append("❌ Trading systems offline")
+            lines.append(f"\n⏰ `{fmt_ist()}`")
             keyboard = InlineKeyboardMarkup([[self._back_btn()]])
             await self._send_or_edit(update, "\n".join(lines), keyboard)
             return
@@ -231,19 +309,22 @@ class TelegramBotRunner:
             try:
                 positions = getattr(self.paper_executor, 'positions', {})
                 if positions:
-                    lines.append("📘 *Paper Positions:*")
+                    lines.append("*Paper Positions:*")
                     for sym, pos in positions.items():
                         lines.append(f"• {sym}: `{pos.get('quantity', 0)}` @ `${pos.get('avg_entry_price', 0):,.2f}`")
                 else:
-                    lines.append("📘 Paper: No open positions")
+                    lines.append("*Paper:* No open positions")
             except:
-                lines.append("📘 Paper: ⚠️ Error")
+                lines.append("*Paper:* ⚠️ Error")
         
         lines.append(f"\n⏰ `{fmt_ist()}`")
         keyboard = InlineKeyboardMarkup([[self._back_btn()]])
         await self._send_or_edit(update, "\n".join(lines), keyboard)
 
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         if not self.paper_executor:
             text = "*📜 History*\n\n🔴 Paper offline\n\n⏰ " + fmt_ist()
             keyboard = InlineKeyboardMarkup([self._nav_row("history")])
@@ -273,6 +354,9 @@ class TelegramBotRunner:
             await self._send_or_edit(update, text, InlineKeyboardMarkup([[self._back_btn()]]), edit)
 
     async def cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         if not self.paper_executor:
             text = "*📈 P&L*\n\n🔴 Offline\n\n⏰ " + fmt_ist()
             keyboard = InlineKeyboardMarkup([self._nav_row("pnl")])
@@ -301,6 +385,9 @@ class TelegramBotRunner:
             await self._send_or_edit(update, text, InlineKeyboardMarkup([[self._back_btn()]]), edit)
 
     async def cmd_markets(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         if not self.market_finder:
             text = "*📊 Markets*\n\n🔴 Finder offline\n\n⏰ " + fmt_ist()
             keyboard = InlineKeyboardMarkup([self._nav_row("markets")])
@@ -326,6 +413,9 @@ class TelegramBotRunner:
             await self._send_or_edit(update, text, InlineKeyboardMarkup([[self._back_btn()]]), edit)
 
     async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         is_auto = self.config.get('auto_trade', False)
         
         text = (
@@ -346,7 +436,38 @@ class TelegramBotRunner:
         
         await self._send_or_edit(update, text, keyboard, edit)
 
+    async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Ping command with authorization check"""
+        if not self._check_authorization(update):
+            return
+        
+        start = time.time()
+        uptime = self.get_uptime()
+        response_time = (time.time() - start) * 1000
+        
+        status_emoji = "🟢" if self.running else "🔴"
+        
+        paper_status = "🟢 Online" if self.paper_executor else "🔴 Offline"
+        live_status = "🟢 Online" if self.live_executor else "🔴 Offline"
+        
+        text = (
+            f"🏓 *Pong!* {status_emoji}\n\n"
+            f"⚡ Response: `{response_time:.1f}ms`\n"
+            f"⏱ Uptime: `{uptime}`\n"
+            f"🕐 Time: `{fmt_ist()}`\n\n"
+            f"*Systems:*\n"
+            f"📘 Paper: {paper_status}\n"
+            f"💰 Live: {live_status}\n\n"
+            f"_All operational ✅_"
+        )
+        
+        keyboard = InlineKeyboardMarkup([[self._back_btn()]])
+        await self._send_or_edit(update, text, keyboard)
+
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+        if not self._check_authorization(update):
+            return
+        
         text = (
             f"*📖 Help*\n\n"
             f"*Commands:*\n"
@@ -357,7 +478,7 @@ class TelegramBotRunner:
             f"/history - History\n"
             f"/pnl - Performance\n"
             f"/settings - Config\n"
-            f"/ping - Bot status ⭐\n\n"
+            f"/ping - Bot status\n\n"
             f"⏰ IST (UTC+5:30)\n"
             f"`{fmt_ist()}`"
         )
@@ -365,7 +486,14 @@ class TelegramBotRunner:
         await self._send_or_edit(update, text, keyboard, edit)
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle callbacks with authorization check"""
         query = update.callback_query
+        
+        # Check authorization for callbacks too
+        if not self._check_authorization(update):
+            await query.answer("⛔ Access Denied", show_alert=True)
+            return
+        
         data = query.data
         
         try:
@@ -380,7 +508,7 @@ class TelegramBotRunner:
                 elif page == "pnl": await self.cmd_pnl(update, context, edit=True)
                 elif page == "settings": await self.cmd_settings(update, context, edit=True)
                 elif page == "help": await self.cmd_help(update, context, edit=True)
-                elif page == "ping": await self.cmd_ping(update, context)  # Handle ping from menu
+                elif page == "ping": await self.cmd_ping(update, context)
                     
             elif data.startswith("refresh_"):
                 page = data.replace("refresh_", "")
@@ -430,51 +558,3 @@ class TelegramBotRunner:
             except:
                 pass
         self.running = False
-
-    async def send_trade_notification(self, trade: Dict):
-        if not self.config.get('notifications_enabled', True): return
-        chat_id = self.config.get('chat_id')
-        if not chat_id: return
-        
-        text = (
-            f"📝 *Trade Executed*\n\n"
-            f"{trade.get('symbol')} {trade.get('side')}\n"
-            f"Size: `{trade.get('size')}` @ `${trade.get('price', 0):,.2f}`\n\n"
-            f"⏰ `{fmt_ist()}`"
-        )
-        try:
-            await self.app.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-        except:
-            pass
-
-    async def send_opportunity_alert(self, opportunity: Dict):
-        chat_id = self.config.get('chat_id')
-        if not chat_id: return
-        
-        text = (
-            f"🔍 *Signal*\n\n"
-            f"{opportunity.get('symbol')} `{opportunity.get('signal')}`\n"
-            f"Confidence: `{opportunity.get('confidence', 0):.0%}`\n\n"
-            f"⏰ `{fmt_ist()}`"
-        )
-        try:
-            await self.app.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-        except:
-            pass
-
-    async def send_closure_notification(self, market_id: str, winner: str, pnl: float, details: Dict = None):
-        chat_id = self.config.get('chat_id')
-        if not chat_id: return
-        
-        emoji = "✅" if pnl >= 0 else "❌"
-        text = (
-            f"{emoji} *Market Closed*\n\n"
-            f"ID: `{market_id[:15]}...`\n"
-            f"Result: {winner}\n"
-            f"PnL: `${pnl:+,.2f}`\n\n"
-            f"⏰ `{fmt_ist()}`"
-        )
-        try:
-            await self.app.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-        except:
-            pass
